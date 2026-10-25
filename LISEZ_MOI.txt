@@ -1,0 +1,16 @@
+MISE EN LIGNE DU TABLEAU DE BORD (Streamlit Community Cloud)
+
+Fichiers a deposer sur GitHub : app.py, requirements.txt
+Fichier a NE PAS deposer sur GitHub : secrets.toml.exemple (modele a copier dans Streamlit)
+
+1. Creer un depot GitHub prive et y deposer app.py et requirements.txt.
+2. Sur share.streamlit.io : New app, choisir le depot, fichier principal app.py, Deploy.
+3. Dans l'application : Manage app, Settings, Secrets.
+4. Coller le contenu de secrets.toml.exemple, remplacer COLLER_LE_TOKEN_ICI par le token Kobo
+   et CHOISIR_UN_MOT_DE_PASSE par un mot de passe different de celui du compte Kobo.
+5. Save. L'application redemarre et charge les donnees, puis se met a jour toutes les 5 minutes.
+
+Les libelles (enqueteurs, villes, familles, articles) sont lus automatiquement dans le formulaire Kobo.
+
+Token Kobo : KoboToolbox, avatar, Parametres du compte, Securite, cle API.
+Formulaire : https://kf.kobotoolbox.org/#/forms/a69oU9UUDkFTVgzzUHKTB6/summary
