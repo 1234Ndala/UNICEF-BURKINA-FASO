@@ -95,13 +95,46 @@ if not check_password():
 
 INTERNE = st.session_state.get("role") == "equipe"
 
-px.defaults.template = "simple_white"
-px.defaults.color_discrete_sequence = ["#1f4e79", "#8a96a3", "#c0792b", "#4f8f6f", "#b9c2cb", "#6b4c7a"]
+px.defaults.template = "plotly_white"
+px.defaults.color_discrete_sequence = ["#2f6fa8", "#8a96a3", "#c0792b", "#4f8f6f", "#b9c2cb", "#6b4c7a"]
 st.markdown(
-    "<style>#MainMenu{visibility:hidden;} footer{visibility:hidden;} [data-testid='stToolbar']{display:none;}"
-    " h1{font-size:1.9rem;} h2,h3{font-weight:600;}</style>",
+    """<style>
+    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stHeaderActionElements"] {display:none !important;}
+    .block-container {padding-top: 2rem; max-width: 1450px;}
+    h1 {font-size: 1.9rem; font-weight: 700; margin-bottom: 0;}
+    h2, h3 {font-weight: 600;}
+    button[data-baseweb="tab"] {padding: .5rem .8rem; font-weight: 500;}
+    .kgrid {display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:12px; margin:.6rem 0 1.4rem;}
+    .kcard {border:1px solid rgba(128,128,128,.28); border-radius:10px; padding:14px 16px; background:rgba(128,128,128,.07);}
+    .klabel {font-size:.74rem; letter-spacing:.04em; text-transform:uppercase; opacity:.72;}
+    .kvalue {font-size:1.85rem; font-weight:650; line-height:1.25; margin:.2rem 0 .35rem;}
+    .kvalue small {font-size:.92rem; font-weight:500; opacity:.65; margin-left:.25rem;}
+    .kbar {height:5px; border-radius:3px; background:rgba(128,128,128,.25); margin:.1rem 0 .5rem; overflow:hidden;}
+    .kbar > div {height:100%; background:#2f6fa8;}
+    .ksub {font-size:.8rem; opacity:.72; line-height:1.3;}
+    </style>""",
     unsafe_allow_html=True,
 )
+
+
+def kpi_row(cards):
+    """Cartes d'indicateurs : (libellé, valeur, suffixe, commentaire, pourcentage de la barre ou None)."""
+    html = ""
+    for lab, val, suf, sub, pc in cards:
+        bar = f'<div class="kbar"><div style="width:{min(max(pc, 0), 100):.1f}%"></div></div>' if pc is not None else ""
+        suffix = f"<small>{suf}</small>" if suf else ""
+        html += f'<div class="kcard"><div class="klabel">{lab}</div><div class="kvalue">{val}{suffix}</div>{bar}<div class="ksub">{sub}</div></div>'
+    st.markdown(f'<div class="kgrid">{html}</div>', unsafe_allow_html=True)
+
+
+def show(fig, width="stretch"):
+    """Graphique adapté au thème clair ou sombre : fond transparent, texte et grille neutres."""
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(color="#6b7785"), title_font_size=15, legend_title_text="")
+    fig.update_xaxes(gridcolor="rgba(128,128,128,.18)", linecolor="rgba(128,128,128,.35)", zerolinecolor="rgba(128,128,128,.3)")
+    fig.update_yaxes(gridcolor="rgba(128,128,128,.18)", linecolor="rgba(128,128,128,.35)", zerolinecolor="rgba(128,128,128,.3)")
+    st.plotly_chart(fig, theme=None, width="stretch")
+
 
 # Les identifiants Kobo ne sont jamais envoyés au navigateur lorsqu'ils sont définis dans les Secrets.
 server = get_conf("KOBO_SERVER", "https://kf.kobotoolbox.org")
@@ -445,15 +478,16 @@ now = pd.Timestamp.now(tz=TZ).tz_localize(None).normalize()
 aujourdhui = int((releves["jour"] == now).sum())
 
 n_un_prix = int((art_cov["Prix valides"] >= 1).sum())
-k = st.columns(6)
-k[0].metric("Articles avec au moins 1 prix", f"{n_un_prix} sur {nomenc_total}",
-            f"{n_un_prix / nomenc_total * 100:.1f} % de la nomenclature" if nomenc_total else None, delta_color="off", delta_arrow="off")
-k[1].metric("Articles couverts", f"{n_couverts} sur {nomenc_total}",
-            f"{n_couverts / nomenc_total * 100:.1f} % ({seuil} prix valides ou plus)" if nomenc_total else None, delta_color="off", delta_arrow="off")
-k[2].metric("Prix valides collectés", f"{len(valides)} sur {objectif}", f"{len(valides) / objectif * 100:.1f} % de l'objectif", delta_color="off", delta_arrow="off")
-k[3].metric("Fournisseurs distincts contactés", n_four, f"{vis_n.loc[vis_n['aboutie'], '_four'].nunique()} avec prix relevés", delta_color="off", delta_arrow="off")
-k[4].metric("Villes couvertes", f"{villes_couv} sur {n_villes_prev}", "au moins un prix valide", delta_color="off", delta_arrow="off")
-k[5].metric("Dernière mise à jour", fetched_at.split(" ")[1], f"Dernière fiche reçue le {visits['_submission_time'].max().strftime('%d/%m à %H:%M')}", delta_color="off", delta_arrow="off")
+tot = max(nomenc_total, 1)
+n_four_prix = vis_n.loc[vis_n["aboutie"], "_four"].nunique()
+kpi_row([
+    ("Articles avec au moins 1 prix", n_un_prix, f"sur {nomenc_total}", f"{n_un_prix / tot * 100:.1f} % de la nomenclature", n_un_prix / tot * 100),
+    ("Articles couverts", n_couverts, f"sur {nomenc_total}", f"{seuil} prix valides ou plus, soit {n_couverts / tot * 100:.1f} %", n_couverts / tot * 100),
+    ("Prix valides collectés", len(valides), f"sur {objectif}", f"{len(valides) / objectif * 100:.1f} % de l'objectif", len(valides) / objectif * 100),
+    ("Fournisseurs distincts contactés", n_four, "", f"dont {n_four_prix} avec prix relevés", None),
+    ("Villes couvertes", villes_couv, f"sur {n_villes_prev}", "au moins un prix valide", villes_couv / n_villes_prev * 100),
+    ("Dernière mise à jour", fetched_at.split(" ")[1], "", f"Dernière fiche reçue le {visits['_submission_time'].max().strftime('%d/%m à %H:%M')}", None),
+])
 
 CLIENT_TABS = ["Avancement", "Fournisseurs et villes", "Fiabilité", "Prix de référence", "Méthodologie"]
 INTERNE_TABS = ["Enquêteurs", "Vagues et localités", "Familles et articles", "Suivi journalier",
@@ -513,7 +547,7 @@ with T["Avancement"]:
         fig.update_yaxes(categoryorder="total ascending")
         fig.update_traces(textposition="outside", marker_color="#2a6f97")
         fig.update_layout(margin=dict(t=50, b=10), height=max(360, 34 * len(cf)))
-        st.plotly_chart(fig, width="stretch")
+        show(fig, width="stretch")
 
         st.subheader("Statut des articles par famille")
         stat = art_cov.groupby(["Famille", "Statut"]).size().rename("Articles").reset_index()
@@ -521,7 +555,7 @@ with T["Avancement"]:
                      category_orders={"Statut": statut_ordre}, color_discrete_map=statut_couleur)
         fig.update_yaxes(categoryorder="total ascending")
         fig.update_layout(legend_title_text="", margin=dict(t=20, b=10), height=max(360, 34 * len(cf)))
-        st.plotly_chart(fig, width="stretch")
+        show(fig, width="stretch")
 
         st.subheader("Statut par article")
         f1, f2 = st.columns(2)
@@ -551,7 +585,7 @@ with T["Fournisseurs et villes"]:
     fig = px.bar(tab_v, y="Ville", x="Prix valides", orientation="h", text="Prix valides", title="Prix valides par ville")
     fig.update_yaxes(categoryorder="total ascending")
     fig.update_layout(margin=dict(t=50, b=10), height=max(320, 32 * len(tab_v)))
-    st.plotly_chart(fig, width="stretch")
+    show(fig, width="stretch")
 
     g1, g2 = st.columns(2)
     with g1:
@@ -567,7 +601,7 @@ with T["Fournisseurs et villes"]:
             fig = px.bar(tt, y="Type", x="Prix valides", orientation="h", text="Prix valides")
             fig.update_yaxes(categoryorder="total ascending")
             fig.update_layout(margin=dict(t=20, b=10))
-            st.plotly_chart(fig, width="stretch")
+            show(fig, width="stretch")
             st.dataframe(tt, hide_index=True, width="stretch")
             st.caption("Un fournisseur déclaré sous plusieurs types est compté dans chacun.")
         else:
@@ -581,7 +615,7 @@ with T["Fournisseurs et villes"]:
             fig = px.bar(canal, y="Canal", x="Prix valides", orientation="h", text="Prix valides")
             fig.update_yaxes(categoryorder="total ascending")
             fig.update_layout(margin=dict(t=20, b=10))
-            st.plotly_chart(fig, width="stretch")
+            show(fig, width="stretch")
             st.dataframe(canal, hide_index=True, width="stretch")
 
     st.subheader("Carte des points de vente")
@@ -599,12 +633,16 @@ with T["Fiabilité"]:
     just = valides["justificatif"].fillna("").astype(str).str.strip().ne("")
     conf = rel_["conformite_code"].isin(["identique", "equivalent"])
     ver = valides["validation"].eq("Approuvé")
-    m = st.columns(5)
-    m[0].metric("Prix avec justificatif", fmt_pct(just.mean() * 100 if len(just) else float("nan")))
-    m[1].metric("Prix à source déclarée", fmt_pct(valides["nature_source"].notna().mean() * 100 if len(valides) else float("nan")))
-    m[2].metric("Produits conformes", fmt_pct(conf.mean() * 100 if len(conf) else float("nan")), "identiques ou équivalents", delta_color="off", delta_arrow="off")
-    m[3].metric("Prix en base HT et TTC", fmt_pct((rel_["base_prix_code"] == "les_deux").mean() * 100 if len(rel_) else float("nan")))
-    m[4].metric("Prix contrôlés (approuvés)", fmt_pct(ver.mean() * 100 if len(ver) else float("nan")), "statut de validation Kobo", delta_color="off", delta_arrow="off")
+    def pc_(x):
+        return float("nan") if len(x) == 0 else x.mean() * 100
+    p_just, p_src, p_conf, p_both, p_ver = pc_(just), pc_(valides["nature_source"].notna()), pc_(conf), pc_(rel_["base_prix_code"] == "les_deux"), pc_(ver)
+    kpi_row([
+        ("Prix avec justificatif", fmt_pct(p_just), "", "photo du devis, du catalogue ou de l'étiquette", None if pd.isna(p_just) else p_just),
+        ("Prix à source déclarée", fmt_pct(p_src), "", "nature de la preuve du prix", None if pd.isna(p_src) else p_src),
+        ("Produits conformes", fmt_pct(p_conf), "", "identiques ou équivalents à la nomenclature", None if pd.isna(p_conf) else p_conf),
+        ("Prix en bases HT et TTC", fmt_pct(p_both), "", "le fournisseur a communiqué les deux prix", None if pd.isna(p_both) else p_both),
+        ("Prix contrôlés", fmt_pct(p_ver), "", "fiches approuvées dans Kobo", None if pd.isna(p_ver) else p_ver),
+    ])
 
     h1, h2 = st.columns(2)
     for col_, ser, titre in ((h1, valides["nature_source"], "Nature de la source du prix"),
@@ -678,13 +716,13 @@ if not INTERNE:
 
 # ---- Enquêteurs
 with T["Enquêteurs"]:
-    k = st.columns(6)
-    k[0].metric("Visites reçues", f"{len(visits):,}".replace(",", " "))
-    k[1].metric("Visites abouties", int(visits["aboutie"].sum()), f"{visits['aboutie'].mean() * 100:.0f} %", delta_color="off", delta_arrow="off")
-    k[2].metric("Prix relevés", f"{len(releves):,}".replace(",", " "), f"{aujourdhui} aujourd'hui", delta_color="off", delta_arrow="off")
-    k[3].metric("Articles distincts", n_dist, f"sur {nomenc_total} à couvrir" if nomenc_total else None, delta_color="off", delta_arrow="off")
-    k[4].metric("Produits différents", n_diff, f"{n_diff / len(releves) * 100:.1f} % des prix relevés" if len(releves) else None, delta_color="off", delta_arrow="off")
-    k[5].metric("Dernière réception", visits["_submission_time"].max().strftime("%d/%m %H:%M"))
+    kpi_row([
+        ("Visites reçues", len(visits), "", f"{int(visits['aboutie'].sum())} abouties, soit {visits['aboutie'].mean() * 100:.0f} %", visits["aboutie"].mean() * 100),
+        ("Prix relevés", len(releves), "", f"{aujourdhui} aujourd'hui", None),
+        ("Articles distincts", n_dist, f"sur {nomenc_total}", "avec au moins un prix relevé", n_dist / max(nomenc_total, 1) * 100),
+        ("Produits différents", n_diff, "", f"{n_diff / len(releves) * 100:.1f} % des prix relevés" if len(releves) else "", None),
+        ("Dernière réception", visits["_submission_time"].max().strftime("%d/%m %H:%M"), "", "", None),
+    ])
     c1, c2 = st.columns(2)
     par_enq = summarize(visits, items, "enqueteur")
     if not par_enq.empty and "Articles saisis" in par_enq:
@@ -724,7 +762,7 @@ with T["Enquêteurs"]:
         heat = releves.assign(Jour=releves["jour"].dt.strftime("%d/%m")).pivot_table(
             index="enqueteur", columns="Jour", values="_id", aggfunc="count", fill_value=0)
         heat = heat[sorted(heat.columns, key=lambda s: (s[3:], s[:2]))]
-        st.plotly_chart(px.imshow(heat, text_auto=True, aspect="auto", color_continuous_scale="Blues",
+        show(px.imshow(heat, text_auto=True, aspect="auto", color_continuous_scale="Blues",
                                   labels=dict(x="Jour", y="Enquêteur", color="Prix relevés")), width="stretch")
 
 # ---- Vagues et localités
@@ -736,13 +774,13 @@ with T["Vagues et localités"]:
     st.subheader("Par vague")
     st.dataframe(par_vague, hide_index=True, width="stretch")
     if not par_vague.empty and "Articles saisis" in par_vague:
-        st.plotly_chart(composition_chart(par_vague, "Vague", "Articles saisis par vague", horizontal=False), width="stretch")
+        show(composition_chart(par_vague, "Vague", "Articles saisis par vague", horizontal=False), width="stretch")
 
     st.subheader("Par ville")
     par_ville = summarize(visits, items, "ville")
     st.dataframe(par_ville, hide_index=True, width="stretch")
     if not par_ville.empty and "Articles saisis" in par_ville:
-        st.plotly_chart(composition_chart(par_ville, "Ville", "Articles saisis par ville"), width="stretch")
+        show(composition_chart(par_ville, "Ville", "Articles saisis par ville"), width="stretch")
 
     st.subheader("Par quartier ou secteur")
     par_q = summarize(visits, items, "quartier")
@@ -881,21 +919,21 @@ with T["Tableau croisé"]:
 
 # ---- Contrôle qualité
 with T["Contrôle qualité"]:
-    q = st.columns(4)
-
     vides = visits[visits["aboutie"] & (visits["nb_articles"].fillna(0) == 0)]
-    q[0].metric("Visites abouties sans article", len(vides))
 
     phys_sans_gps = visits[visits["mode_collecte_code"] == "physique"]
     phys_sans_gps = phys_sans_gps[phys_sans_gps["latitude"].isna()]
-    q[1].metric("Visites physiques sans GPS", len(phys_sans_gps))
 
     visits = visits.assign(_f=visits["nom_fournisseur"].fillna("").str.lower().str.strip())
     dup_v = visits[(visits["_f"] != "") & visits.duplicated(["enqueteur_code", "_f", "jour"], keep=False)]
-    q[2].metric("Visites possiblement en double", len(dup_v))
 
     dup_a = items[items["article_code"].notna() & items.duplicated(["_id", "article_code"], keep=False)]
-    q[3].metric("Article saisi deux fois dans une visite", len(dup_a))
+    kpi_row([
+        ("Visites abouties sans article", len(vides), "", "incohérence de saisie", None),
+        ("Visites physiques sans GPS", len(phys_sans_gps), "", "position non enregistrée", None),
+        ("Visites possiblement en double", len(dup_v), "", "même enquêteur, fournisseur et jour", None),
+        ("Articles saisis deux fois", len(dup_a), "", "dans une même visite", None),
+    ])
 
     st.subheader("Produits différents à suivre avec le superviseur")
     diff = items[items["different"]][["id_visite", "enqueteur", "nom_fournisseur", "article", "conformite_prec", "jour"]]
