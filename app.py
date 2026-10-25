@@ -6,7 +6,9 @@ vague, localité, famille d'articles et jour, contrôles qualité et export fina
 
 import io
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -35,6 +37,9 @@ LABEL_LISTS = {
     "conformite": "conformite",
     "resultat_visite": "resultats",
     "disponibilite": "dispo",
+    "mode_collecte": "modes",
+    "nature_source": "sources",
+    "base_prix": "base_prix",
 }
 
 VISIT_COLS = [
@@ -42,13 +47,15 @@ VISIT_COLS = [
     "enqueteur", "enqueteur_2", "vague", "ville", "ville_autre", "quartier", "quartier_autre",
     "adresse", "gps", "mode_collecte", "nom_fournisseur", "collecte_possible", "motif_impossible",
     "resultat_visite", "resultat_precision", "nb_articles", "commentaire_visite",
+    "type_fournisseur", "validation",
 ]
 ITEM_COLS = [
     "_id", "famille", "article", "disponibilite", "quantite_stock", "conformite", "conformite_prec",
     "marque", "etat", "origine", "unite_vente", "unite_base", "nb_unites", "qte_prix", "devise",
     "base_prix", "prix_ht", "prix_ttc", "prix_retenu", "base_retenue", "prix_comparable",
-    "livraison", "niveau_prix", "conditions_paiement", "nature_source", "date_obs", "commentaire",
+    "livraison", "niveau_prix", "conditions_paiement", "nature_source", "justificatif", "date_obs", "commentaire",
 ]
+VALIDATION_FR = {"Approved": "Approuvé", "Not Approved": "Non approuvé", "On Hold": "En attente"}
 NUM_ITEM = ["quantite_stock", "nb_unites", "qte_prix", "prix_ht", "prix_ttc", "prix_retenu", "prix_comparable"]
 
 
@@ -63,14 +70,20 @@ def get_conf(key, default=""):
 
 
 def check_password():
-    pwd = get_conf("APP_PASSWORD")
-    if not pwd or st.session_state.get("auth_ok"):
+    pwd_equipe = get_conf("APP_PASSWORD")
+    pwd_client = get_conf("APP_PASSWORD_CLIENT")
+    if not pwd_equipe and not pwd_client:
+        st.session_state["role"] = "equipe"
+    if st.session_state.get("role"):
         return True
     st.title("Accès restreint")
     saisie = st.text_input("Mot de passe", type="password")
     if saisie:
-        if saisie == pwd:
-            st.session_state["auth_ok"] = True
+        if pwd_equipe and saisie == pwd_equipe:
+            st.session_state["role"] = "equipe"
+            st.rerun()
+        elif pwd_client and saisie == pwd_client:
+            st.session_state["role"] = "client"
             st.rerun()
         else:
             st.error("Mot de passe incorrect.")
@@ -80,13 +93,31 @@ def check_password():
 if not check_password():
     st.stop()
 
-st.sidebar.header("Connexion KoboToolbox")
-server = st.sidebar.text_input("Serveur", get_conf("KOBO_SERVER", "https://kf.kobotoolbox.org"))
-token = st.sidebar.text_input("Jeton API", get_conf("KOBO_TOKEN"), type="password")
-asset_uid = st.sidebar.text_input("Identifiant du formulaire", get_conf("KOBO_ASSET_UID"))
+INTERNE = st.session_state.get("role") == "equipe"
+
+px.defaults.template = "simple_white"
+px.defaults.color_discrete_sequence = ["#1f4e79", "#8a96a3", "#c0792b", "#4f8f6f", "#b9c2cb", "#6b4c7a"]
+st.markdown(
+    "<style>#MainMenu{visibility:hidden;} footer{visibility:hidden;} [data-testid='stToolbar']{display:none;}"
+    " h1{font-size:1.9rem;} h2,h3{font-weight:600;}</style>",
+    unsafe_allow_html=True,
+)
+
+# Les identifiants Kobo ne sont jamais envoyés au navigateur lorsqu'ils sont définis dans les Secrets.
+server = get_conf("KOBO_SERVER", "https://kf.kobotoolbox.org")
+token = get_conf("KOBO_TOKEN")
+asset_uid = get_conf("KOBO_ASSET_UID")
+if INTERNE and not (token and asset_uid):
+    st.sidebar.header("Connexion KoboToolbox")
+    server = st.sidebar.text_input("Serveur", server)
+    token = st.sidebar.text_input("Jeton API", token, type="password")
+    asset_uid = st.sidebar.text_input("Identifiant du formulaire", asset_uid)
 
 st.sidebar.header("Actualisation")
-interval = st.sidebar.selectbox("Actualisation automatique", ["Désactivée", "1 minute", "5 minutes", "15 minutes"], index=2)
+if INTERNE:
+    interval = st.sidebar.selectbox("Actualisation automatique", ["Désactivée", "1 minute", "5 minutes", "15 minutes"], index=2)
+else:
+    interval = "5 minutes"
 if interval != "Désactivée" and st_autorefresh is not None:
     st_autorefresh(interval=int(interval.split()[0]) * 60 * 1000, key="auto_refresh")
 if st.sidebar.button("Actualiser maintenant"):
@@ -146,7 +177,7 @@ def fetch_data(server_url, api_token, uid):
         rows.extend(payload.get("results", []))
         url = payload.get("next")
         params = None
-    return rows
+    return rows, datetime.now(ZoneInfo(TZ)).strftime("%d/%m/%Y %H:%M")
 
 
 def last(key):
@@ -186,6 +217,8 @@ def build_tables(records, labels):
     visits, items = [], []
     for rec in records:
         v = flat(rec)
+        vs = rec.get("_validation_status") or {}
+        v["validation"] = VALIDATION_FR.get(vs.get("label"), "Non vérifié") if vs.get("label") else "Non vérifié"
         visits.append(v)
         for obs in find_repeat(rec):
             row = flat(obs)
@@ -218,11 +251,12 @@ def build_tables(records, labels):
     di["releve"] = di["disponibilite"].isin(["stock", "commande"])
     di["different"] = di["conformite"].eq("different")
     di["retenue"] = di["releve"] & ~di["different"]
+    di["valide"] = di["retenue"] & (di["prix_retenu"] > 0)
     di["article_code"] = di["article"]
     di["famille_code"] = di["famille"]
 
     keep = ["_id", "id_visite", "enqueteur", "vague", "ville", "quartier", "nom_fournisseur",
-            "mode_collecte", "jour_visite", "jour_reception"]
+            "mode_collecte", "jour_visite", "jour_reception", "type_fournisseur", "validation"]
     di = di.merge(dv[keep], on="_id", how="left")
 
     dv = apply_labels(dv, labels)
@@ -269,6 +303,33 @@ def summarize(visits, items, key, nomenclature=None):
     return out.reset_index().rename(columns={key: key.capitalize() if key != "jour" else "Jour"})
 
 
+def coverage_table(valides, pret, labels, seuil):
+    """Une ligne par article de la nomenclature, avec le nombre de prix valides et le statut."""
+    cnt = valides.groupby("article_code").size()
+    art = pret.rename(columns={"name": "article_code", "label": "Article"}).copy()
+    art["Famille"] = art["famille"].map(labels.get("familles", {})).fillna(art["famille"])
+    art["Prix valides"] = art["article_code"].map(cnt).fillna(0).astype(int)
+    art["Statut"] = art["Prix valides"].map(lambda n: statut_label(n, seuil))
+    return art[["Famille", "article_code", "Article", "Prix valides", "Statut"]]
+
+
+def statut_label(n, seuil):
+    if n == 0:
+        return "Non couvert"
+    if n >= seuil:
+        return f"{seuil} prix ou plus"
+    return "1 prix" if seuil == 2 else f"1 à {seuil - 1} prix"
+
+
+def coverage_by_famille(art, seuil):
+    g = art.groupby("Famille").agg(**{
+        "Articles": ("article_code", "size"),
+        "Articles couverts": ("Prix valides", lambda s: int((s >= seuil).sum())),
+    })
+    g["Couverture (%)"] = pct(g["Articles couverts"], g["Articles"])
+    return g.reset_index()
+
+
 def to_excel(sheets):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
@@ -288,14 +349,14 @@ def to_excel(sheets):
 
 # ------------------------------------------------------------------ Page
 st.title("Suivi de la collecte des prix")
-st.caption("UNICEF Burkina Faso. Données lues en continu depuis KoboToolbox.")
+st.caption("UNICEF Burkina Faso")
 
 if not (server and token and asset_uid):
     st.info("Renseigner le serveur, le jeton API et l'identifiant du formulaire dans la barre latérale.")
     st.stop()
 
 try:
-    records = fetch_data(server, token, asset_uid)
+    records, fetched_at = fetch_data(server, token, asset_uid)
 except requests.HTTPError as e:
     code = e.response.status_code if e.response is not None else "?"
     st.error(f"Connexion à KoboToolbox impossible (code {code}). Vérifier le serveur, le jeton et l'identifiant du formulaire.")
@@ -318,7 +379,7 @@ nomenc_fam = pret.groupby("famille").size().rename(lambda k: labels.get("famille
 
 # ------------------------------------------------------------------ Filtres
 st.sidebar.header("Filtres")
-ref = st.sidebar.radio("Date de référence", ["Date de la visite", "Date de réception"], help="Date saisie sur le terminal ou date d'arrivée de la fiche sur le serveur.")
+ref = st.sidebar.radio("Date de référence", ["Date de la visite", "Date de réception"], help="Date saisie sur le terminal ou date d'arrivée de la fiche sur le serveur.") if INTERNE else "Date de la visite"
 ref_col = "jour_visite" if ref == "Date de la visite" else "jour_reception"
 visits_all["jour"] = visits_all[ref_col]
 items_all["jour"] = items_all[ref_col]
@@ -330,7 +391,7 @@ vague_order = [v for v in labels.get("vagues", {}).values() if v in set(visits_a
 sel = {}
 sel["vague"] = st.sidebar.multiselect("Vague", vague_order or sorted(visits_all["vague"].dropna().unique()))
 sel["ville"] = st.sidebar.multiselect("Ville", sorted(visits_all["ville"].dropna().unique()))
-sel["enqueteur"] = st.sidebar.multiselect("Enquêteur", sorted(visits_all["enqueteur"].dropna().unique()))
+sel["enqueteur"] = st.sidebar.multiselect("Enquêteur", sorted(visits_all["enqueteur"].dropna().unique())) if INTERNE else []
 
 visits, items = visits_all.copy(), items_all.copy()
 if isinstance(periode, tuple) and len(periode) == 2:
@@ -353,16 +414,52 @@ n_diff = int(items["different"].sum())
 now = pd.Timestamp.now(tz=TZ).tz_localize(None).normalize()
 aujourdhui = int((releves["jour"] == now).sum())
 
-k = st.columns(6)
-k[0].metric("Visites reçues", f"{len(visits):,}".replace(",", " "))
-k[1].metric("Visites abouties", int(visits["aboutie"].sum()), f"{visits['aboutie'].mean() * 100:.0f} %", delta_color="off")
-k[2].metric("Prix relevés", f"{len(releves):,}".replace(",", " "), f"{aujourdhui} aujourd'hui", delta_color="off")
-k[3].metric("Articles distincts", n_dist, f"sur {nomenc_total} à couvrir" if nomenc_total else None, delta_color="off")
-k[4].metric("Produits différents", n_diff, f"{n_diff / len(releves) * 100:.1f} % des prix relevés" if len(releves) else None, delta_color="off")
-k[5].metric("Dernière réception", visits["_submission_time"].max().strftime("%d/%m %H:%M"))
+st.caption(f"Les filtres de la barre latérale s'appliquent à tous les indicateurs. Données chargées le {fetched_at}.")
 
-tabs = st.tabs(["Synthèse", "Enquêteurs", "Vagues et localités", "Familles et articles",
-                "Suivi journalier", "Tableau croisé", "Contrôle qualité", "Données"])
+seuil, objectif_saisi = 2, 0
+if INTERNE:
+    with st.sidebar.expander("Paramètres de suivi"):
+        seuil = int(st.number_input("Prix valides minimum par article", 1, 10, 2))
+        objectif_saisi = int(st.number_input("Objectif de prix valides (0 : articles à couvrir x minimum)", 0, 100000, 0))
+objectif = objectif_saisi or max(nomenc_total, 1) * seuil
+
+
+def norm_name(series):
+    return series.fillna("").astype(str).str.lower().str.strip()
+
+
+valides = items[items["valide"]].assign(_four=lambda d: norm_name(d["nom_fournisseur"]))
+vis_n = visits.assign(_four=norm_name(visits["nom_fournisseur"]))
+art_cov = coverage_table(valides, pret, labels, seuil)
+n_couverts = int((art_cov["Prix valides"] >= seuil).sum())
+n_four = vis_n.loc[vis_n["_four"] != "", "_four"].nunique()
+villes_prev = [c for c in labels.get("villes", {}) if c != "autre"]
+n_villes_prev = len(villes_prev) or 11
+villes_couv = valides.loc[valides["ville_code"].isin(villes_prev), "ville_code"].nunique()
+
+# ------------------------------------------------------------------ Indicateurs
+releves = items[items["releve"]]
+n_dist = releves["article_code"].nunique()
+n_diff = int(items["different"].sum())
+now = pd.Timestamp.now(tz=TZ).tz_localize(None).normalize()
+aujourdhui = int((releves["jour"] == now).sum())
+
+n_un_prix = int((art_cov["Prix valides"] >= 1).sum())
+k = st.columns(6)
+k[0].metric("Articles avec au moins 1 prix", f"{n_un_prix} sur {nomenc_total}",
+            f"{n_un_prix / nomenc_total * 100:.1f} % de la nomenclature" if nomenc_total else None, delta_color="off", delta_arrow="off")
+k[1].metric("Articles couverts", f"{n_couverts} sur {nomenc_total}",
+            f"{n_couverts / nomenc_total * 100:.1f} % ({seuil} prix valides ou plus)" if nomenc_total else None, delta_color="off", delta_arrow="off")
+k[2].metric("Prix valides collectés", f"{len(valides)} sur {objectif}", f"{len(valides) / objectif * 100:.1f} % de l'objectif", delta_color="off", delta_arrow="off")
+k[3].metric("Fournisseurs distincts contactés", n_four, f"{vis_n.loc[vis_n['aboutie'], '_four'].nunique()} avec prix relevés", delta_color="off", delta_arrow="off")
+k[4].metric("Villes couvertes", f"{villes_couv} sur {n_villes_prev}", "au moins un prix valide", delta_color="off", delta_arrow="off")
+k[5].metric("Dernière mise à jour", fetched_at.split(" ")[1], f"Dernière fiche reçue le {visits['_submission_time'].max().strftime('%d/%m à %H:%M')}", delta_color="off", delta_arrow="off")
+
+CLIENT_TABS = ["Avancement", "Fournisseurs et villes", "Fiabilité", "Prix de référence", "Méthodologie"]
+INTERNE_TABS = ["Enquêteurs", "Vagues et localités", "Familles et articles", "Suivi journalier",
+                "Tableau croisé", "Contrôle qualité", "Données"]
+noms = CLIENT_TABS[:-1] + INTERNE_TABS + ["Méthodologie"] if INTERNE else CLIENT_TABS
+T = dict(zip(noms, st.tabs(noms)))
 
 compo_colors = {"Observations retenues": "#2a6f97", "Produits différents": "#e07a1f", "Non relevés": "#b8bec6"}
 
@@ -382,8 +479,212 @@ def composition_chart(df, key_name, title, horizontal=True):
     return fig
 
 
-# ---- Synthèse
-with tabs[0]:
+def share_chart(series, title):
+    s_ = series.dropna()
+    if s_.empty:
+        return None
+    d_ = (s_.value_counts(normalize=True) * 100).round(1).rename_axis("Modalité").reset_index(name="Part (%)")
+    fig_ = px.bar(d_, y="Modalité", x="Part (%)", orientation="h", title=title, text="Part (%)", range_x=[0, 105])
+    fig_.update_yaxes(categoryorder="total ascending")
+    fig_.update_layout(margin=dict(t=50, b=10))
+    return fig_
+
+
+def fmt_pct(x):
+    return "n.d." if pd.isna(x) else f"{x:.1f} %"
+
+
+# ---- Avancement
+with T["Avancement"]:
+    s_part = "1 prix" if seuil == 2 else f"1 à {seuil - 1} prix"
+    s_full = f"{seuil} prix ou plus"
+    statut_ordre = ["Non couvert", s_part, s_full] if seuil > 1 else ["Non couvert", s_full]
+    statut_couleur = {"Non couvert": "#b8bec6", s_part: "#e07a1f", s_full: "#2a6f97"}
+
+    st.subheader("Couverture par famille d'articles")
+    cf = coverage_by_famille(art_cov, seuil)
+    if cf.empty:
+        st.info("La nomenclature n'a pas pu être lue dans le formulaire.")
+    else:
+        cf["Libellé"] = cf["Famille"] + " (" + cf["Articles"].astype(str) + " articles)"
+        cf["Texte"] = cf["Articles couverts"].astype(str) + " sur " + cf["Articles"].astype(str)
+        fig = px.bar(cf, y="Libellé", x="Couverture (%)", orientation="h", text="Texte", range_x=[0, 115],
+                     title=f"Articles couverts (au moins {seuil} prix valides), en %")
+        fig.update_yaxes(categoryorder="total ascending")
+        fig.update_traces(textposition="outside", marker_color="#2a6f97")
+        fig.update_layout(margin=dict(t=50, b=10), height=max(360, 34 * len(cf)))
+        st.plotly_chart(fig, width="stretch")
+
+        st.subheader("Statut des articles par famille")
+        stat = art_cov.groupby(["Famille", "Statut"]).size().rename("Articles").reset_index()
+        fig = px.bar(stat, y="Famille", x="Articles", color="Statut", orientation="h",
+                     category_orders={"Statut": statut_ordre}, color_discrete_map=statut_couleur)
+        fig.update_yaxes(categoryorder="total ascending")
+        fig.update_layout(legend_title_text="", margin=dict(t=20, b=10), height=max(360, 34 * len(cf)))
+        st.plotly_chart(fig, width="stretch")
+
+        st.subheader("Statut par article")
+        f1, f2 = st.columns(2)
+        fam_f = f1.multiselect("Famille", sorted(art_cov["Famille"].unique()), key="av_fam")
+        sta_f = f2.multiselect("Statut", statut_ordre, default=["Non couvert"], key="av_sta")
+        vue_art = art_cov
+        if fam_f:
+            vue_art = vue_art[vue_art["Famille"].isin(fam_f)]
+        if sta_f:
+            vue_art = vue_art[vue_art["Statut"].isin(sta_f)]
+        st.write(f"{len(vue_art)} article(s).")
+        st.dataframe(vue_art.drop(columns="article_code").sort_values(["Famille", "Prix valides"]),
+                     hide_index=True, width="stretch", height=360)
+
+# ---- Fournisseurs et villes
+with T["Fournisseurs et villes"]:
+    st.subheader("Prix valides par ville")
+    villes_liste = list(labels.get("villes", {}).values()) or sorted(visits["ville"].dropna().unique())
+    vis_v = vis_n.groupby("ville").agg(**{"Visites": ("_id", "size"),
+                                          "Fournisseurs contactés": ("_four", lambda x: x[x != ""].nunique())})
+    prix_v = valides.groupby("ville").size().rename("Prix valides")
+    tab_v = pd.DataFrame({"Ville": villes_liste}).merge(vis_v, left_on="Ville", right_index=True, how="left") \
+        .merge(prix_v, left_on="Ville", right_index=True, how="left").fillna(0)
+    for c_ in ("Visites", "Fournisseurs contactés", "Prix valides"):
+        tab_v[c_] = tab_v[c_].astype(int)
+    st.dataframe(tab_v, hide_index=True, width="stretch")
+    fig = px.bar(tab_v, y="Ville", x="Prix valides", orientation="h", text="Prix valides", title="Prix valides par ville")
+    fig.update_yaxes(categoryorder="total ascending")
+    fig.update_layout(margin=dict(t=50, b=10), height=max(320, 32 * len(tab_v)))
+    st.plotly_chart(fig, width="stretch")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Par type de fournisseur")
+        tv = valides[["_four", "type_fournisseur"]].copy()
+        tv["t"] = tv["type_fournisseur"].fillna("").str.split()
+        tv = tv.explode("t")
+        tv = tv[tv["t"].notna() & (tv["t"] != "")]
+        if len(tv):
+            tv["Type"] = tv["t"].map(lambda x: labels.get("type_fourn", {}).get(x, x))
+            tt = tv.groupby("Type").agg(**{"Prix valides": ("t", "size"),
+                                           "Fournisseurs": ("_four", lambda x: x[x != ""].nunique())}).reset_index()
+            fig = px.bar(tt, y="Type", x="Prix valides", orientation="h", text="Prix valides")
+            fig.update_yaxes(categoryorder="total ascending")
+            fig.update_layout(margin=dict(t=20, b=10))
+            st.plotly_chart(fig, width="stretch")
+            st.dataframe(tt, hide_index=True, width="stretch")
+            st.caption("Un fournisseur déclaré sous plusieurs types est compté dans chacun.")
+        else:
+            st.info("Aucun type de fournisseur renseigné.")
+    with g2:
+        st.subheader("Par canal de collecte")
+        vc = vis_n.groupby("mode_collecte").size().rename("Visites")
+        pc = valides.groupby("mode_collecte").size().rename("Prix valides")
+        canal = pd.concat([vc, pc], axis=1).fillna(0).astype(int).rename_axis("Canal").reset_index()
+        if len(canal):
+            fig = px.bar(canal, y="Canal", x="Prix valides", orientation="h", text="Prix valides")
+            fig.update_yaxes(categoryorder="total ascending")
+            fig.update_layout(margin=dict(t=20, b=10))
+            st.plotly_chart(fig, width="stretch")
+            st.dataframe(canal, hide_index=True, width="stretch")
+
+    st.subheader("Carte des points de vente")
+    if st.checkbox("Afficher la carte", value=False, key="carte_client"):
+        geo_c = visits.dropna(subset=["latitude", "longitude"])
+        if len(geo_c):
+            st.map(geo_c, latitude="latitude", longitude="longitude")
+        else:
+            st.info("Aucune coordonnée GPS disponible.")
+
+# ---- Fiabilité
+with T["Fiabilité"]:
+    st.caption("Les parts sont calculées sur les prix valides, sauf la conformité et la base de prix, calculées sur l'ensemble des prix relevés.")
+    rel_ = items[items["releve"]]
+    just = valides["justificatif"].fillna("").astype(str).str.strip().ne("")
+    conf = rel_["conformite_code"].isin(["identique", "equivalent"])
+    ver = valides["validation"].eq("Approuvé")
+    m = st.columns(5)
+    m[0].metric("Prix avec justificatif", fmt_pct(just.mean() * 100 if len(just) else float("nan")))
+    m[1].metric("Prix à source déclarée", fmt_pct(valides["nature_source"].notna().mean() * 100 if len(valides) else float("nan")))
+    m[2].metric("Produits conformes", fmt_pct(conf.mean() * 100 if len(conf) else float("nan")), "identiques ou équivalents", delta_color="off", delta_arrow="off")
+    m[3].metric("Prix en base HT et TTC", fmt_pct((rel_["base_prix_code"] == "les_deux").mean() * 100 if len(rel_) else float("nan")))
+    m[4].metric("Prix contrôlés (approuvés)", fmt_pct(ver.mean() * 100 if len(ver) else float("nan")), "statut de validation Kobo", delta_color="off", delta_arrow="off")
+
+    h1, h2 = st.columns(2)
+    for col_, ser, titre in ((h1, valides["nature_source"], "Nature de la source du prix"),
+                             (h2, rel_["conformite"], "Conformité à la nomenclature")):
+        fig = share_chart(ser, titre)
+        if fig is not None:
+            col_.plotly_chart(fig, width="stretch")
+    h3, h4 = st.columns(2)
+    for col_, ser, titre in ((h3, rel_["base_prix"], "Base du prix communiqué"),
+                             (h4, valides["validation"], "Contrôle par le superviseur")):
+        fig = share_chart(ser, titre)
+        if fig is not None:
+            col_.plotly_chart(fig, width="stretch")
+    st.caption("Le contrôle par le superviseur utilise le statut de validation de KoboToolbox (Approuvé, Non approuvé, En attente). Les fiches non encore examinées sont « Non vérifié ».")
+
+# ---- Prix de référence
+with T["Prix de référence"]:
+    st.caption("Indicateurs provisoires, non validés, présentés par famille sans détail par article. Prix par unité de base, en XOF, prix valides uniquement.")
+    xo = valides[(valides["devise"] == "xof") & (valides["prix_comparable"] > 0)]
+    if len(xo):
+        ref_f = xo.groupby("famille").agg(**{
+            "Prix valides": ("prix_comparable", "size"),
+            "Minimum": ("prix_comparable", "min"),
+            "Médiane": ("prix_comparable", "median"),
+            "Maximum": ("prix_comparable", "max"),
+        })
+        pa = xo.groupby(["famille", "article_code"])["prix_comparable"].agg(["count", "min", "max"])
+        pa = pa[pa["count"] >= 2]
+        pa["ecart"] = (pa["max"] / pa["min"] - 1) * 100
+        ref_f["Articles avec 2 prix ou plus"] = pa.groupby("famille").size()
+        ref_f["Écart médian entre prix d'un même article (%)"] = pa.groupby("famille")["ecart"].median().round(1)
+        ref_f = ref_f.fillna({"Articles avec 2 prix ou plus": 0}).reset_index().rename(columns={"famille": "Famille"})
+        ref_f["Articles avec 2 prix ou plus"] = ref_f["Articles avec 2 prix ou plus"].astype(int)
+        for c_ in ("Minimum", "Médiane", "Maximum"):
+            ref_f[c_] = ref_f[c_].round(0).astype(int)
+        st.dataframe(ref_f, hide_index=True, width="stretch")
+        st.caption("Une famille regroupe des articles de natures et d'unités différentes : le minimum, la médiane et le maximum ne sont pas des prix de référence d'un article. "
+                   "L'écart médian entre prix d'un même article est l'indicateur le plus lisible de la dispersion des prix collectés.")
+    else:
+        st.info("Aucun prix valide en XOF pour le moment.")
+
+# ---- Méthodologie
+with T["Méthodologie"]:
+    vagues_txt = ", ".join(labels.get("vagues", {}).values()) or "voir le formulaire"
+    st.markdown(f"""
+### Prix valide
+Un prix est valide lorsque l'article est disponible en stock ou sur commande, que le fournisseur a communiqué un prix, et que le produit proposé est jugé **identique** ou **équivalent** à la désignation de la nomenclature. Les produits jugés **différents** sont conservés dans la base pour la traçabilité mais ne sont pas comptés.
+
+### Article couvert
+Un article de la nomenclature est couvert lorsqu'il compte au moins **{seuil} prix valides**. La nomenclature comprend **{nomenc_total} articles** sélectionnables (statut « prêt »). Trois niveaux sont suivis : non couvert, couverture partielle, couvert.
+
+### Objectif de collecte
+L'objectif est fixé à **{objectif} prix valides**, soit {seuil} prix par article de la nomenclature.
+
+### Base de prix
+Le prix retenu est le prix hors taxes (HT), sauf lorsque le fournisseur ne communique que le prix toutes taxes comprises (TTC). Le prix par unité de base est calculé par le formulaire à partir du prix retenu, de la quantité du prix et du nombre d'unités de base par unité de vente.
+
+### Périmètre de la collecte
+Vagues prévues : {vagues_txt}. Villes prévues : {n_villes_prev}. Un fournisseur est comptabilisé une seule fois, quel que soit le nombre de visites ou d'articles, sur la base du nom saisi : deux orthographes différentes comptent pour deux fournisseurs.
+
+### Fiabilité
+La part de prix avec justificatif correspond aux prix accompagnés d'une photo (devis, catalogue ou étiquette). La source déclarée est la nature de la preuve du prix (affichage, oral, devis, catalogue). Le contrôle par le superviseur repose sur le statut de validation de KoboToolbox.
+
+### Limites
+Le tableau de bord ne regroupe pas automatiquement les points de vente d'un même groupe : le formulaire demande de les signaler, mais plusieurs prix d'un même groupe sont comptés séparément. Les données sont rechargées automatiquement toutes les 5 minutes par défaut (réglable dans la barre latérale) ou à la demande avec le bouton « Actualiser maintenant ».
+""")
+
+
+if not INTERNE:
+    st.stop()
+
+# ---- Enquêteurs
+with T["Enquêteurs"]:
+    k = st.columns(6)
+    k[0].metric("Visites reçues", f"{len(visits):,}".replace(",", " "))
+    k[1].metric("Visites abouties", int(visits["aboutie"].sum()), f"{visits['aboutie'].mean() * 100:.0f} %", delta_color="off", delta_arrow="off")
+    k[2].metric("Prix relevés", f"{len(releves):,}".replace(",", " "), f"{aujourdhui} aujourd'hui", delta_color="off", delta_arrow="off")
+    k[3].metric("Articles distincts", n_dist, f"sur {nomenc_total} à couvrir" if nomenc_total else None, delta_color="off", delta_arrow="off")
+    k[4].metric("Produits différents", n_diff, f"{n_diff / len(releves) * 100:.1f} % des prix relevés" if len(releves) else None, delta_color="off", delta_arrow="off")
+    k[5].metric("Dernière réception", visits["_submission_time"].max().strftime("%d/%m %H:%M"))
     c1, c2 = st.columns(2)
     par_enq = summarize(visits, items, "enqueteur")
     if not par_enq.empty and "Articles saisis" in par_enq:
@@ -407,9 +708,8 @@ with tabs[0]:
             "- **Couverture** : articles distincts rapportés aux articles sélectionnables (statut « prêt »)."
         )
 
-# ---- Enquêteurs
-with tabs[1]:
-    st.dataframe(par_enq, hide_index=True, width="stretch")
+# ---- Enquêteurs (suite)
+with T["Enquêteurs"]:
     if not par_enq.empty and "Articles saisis" in par_enq:
         c1, c2 = st.columns(2)
         fig = px.bar(par_enq, y="Enqueteur", x="Articles distincts", orientation="h", title="Articles distincts par enquêteur")
@@ -428,7 +728,7 @@ with tabs[1]:
                                   labels=dict(x="Jour", y="Enquêteur", color="Prix relevés")), width="stretch")
 
 # ---- Vagues et localités
-with tabs[2]:
+with T["Vagues et localités"]:
     par_vague = summarize(visits, items, "vague")
     if not par_vague.empty and vague_order:
         par_vague["_o"] = par_vague["Vague"].map({v: n for n, v in enumerate(vague_order)})
@@ -456,7 +756,7 @@ with tabs[2]:
         st.info("Aucune coordonnée GPS disponible.")
 
 # ---- Familles et articles
-with tabs[3]:
+with T["Familles et articles"]:
     par_fam = summarize(visits, items, "famille", nomenclature=nomenc_fam)
     st.subheader("Par famille d'articles")
     st.dataframe(par_fam, hide_index=True, width="stretch")
@@ -510,7 +810,7 @@ with tabs[3]:
         st.dataframe(manque, hide_index=True, width="stretch", height=320)
 
 # ---- Suivi journalier
-with tabs[4]:
+with T["Suivi journalier"]:
     if len(items):
         par_jour2 = summarize(visits, items, "jour")
         par_jour2["Jour"] = pd.to_datetime(par_jour2["Jour"])
@@ -538,7 +838,7 @@ with tabs[4]:
         st.info("Aucun article saisi pour le moment.")
 
 # ---- Tableau croisé
-with tabs[5]:
+with T["Tableau croisé"]:
     dims = {"Enquêteur": "enqueteur", "Vague": "vague", "Ville": "ville", "Famille": "famille", "Jour": "jour"}
     mesures = ["Visites", "Prix relevés", "Articles distincts", "Produits différents", "Observations retenues", "Articles saisis"]
     c1, c2, c3 = st.columns(3)
@@ -580,14 +880,13 @@ with tabs[5]:
             st.caption("Le total d'une ligne compte chaque article une seule fois, il n'est donc pas la somme des colonnes.")
 
 # ---- Contrôle qualité
-with tabs[6]:
+with T["Contrôle qualité"]:
     q = st.columns(4)
 
     vides = visits[visits["aboutie"] & (visits["nb_articles"].fillna(0) == 0)]
     q[0].metric("Visites abouties sans article", len(vides))
 
-    phys_sans_gps = visits[(visits["mode_collecte"] == labels.get("modes", {}).get("physique", "physique")) |
-                           (visits["mode_collecte"] == "physique")]
+    phys_sans_gps = visits[visits["mode_collecte_code"] == "physique"]
     phys_sans_gps = phys_sans_gps[phys_sans_gps["latitude"].isna()]
     q[1].metric("Visites physiques sans GPS", len(phys_sans_gps))
 
@@ -597,34 +896,6 @@ with tabs[6]:
 
     dup_a = items[items["article_code"].notna() & items.duplicated(["_id", "article_code"], keep=False)]
     q[3].metric("Article saisi deux fois dans une visite", len(dup_a))
-
-    st.subheader("Durée de remplissage")
-    dd = visits[visits["aboutie"]]["duree_min"].dropna()
-    if len(dd):
-        seuil = st.slider("Seuil de durée suspecte (minutes)", 0.0, float(max(dd.quantile(0.95), 5)), 3.0, step=0.5)
-        courtes = visits[visits["aboutie"] & (visits["duree_min"] < seuil)][
-            ["id_visite", "enqueteur", "nom_fournisseur", "jour", "duree_min", "nb_articles"]]
-        dur = visits[visits["aboutie"]].groupby("enqueteur")["duree_min"].agg(["median", "min", "max"]).round(1).reset_index()
-        dur.columns = ["Enquêteur", "Durée médiane (min)", "Durée minimale (min)", "Durée maximale (min)"]
-        st.dataframe(dur, hide_index=True, width="stretch")
-        st.write(f"{len(courtes)} visite(s) abouties plus courtes que {seuil:g} min.")
-        if len(courtes):
-            st.dataframe(courtes.sort_values("duree_min"), hide_index=True, width="stretch")
-
-    st.subheader("Prix atypiques")
-    st.caption("Prix par unité de base s'écartant de plus de 3 fois (ou moins du tiers) de la médiane de l'article, pour les articles ayant au moins 3 observations retenues.")
-    ret = items[items["retenue"] & (items["prix_comparable"] > 0)].copy()
-    if len(ret):
-        stats = ret.groupby("article_code")["prix_comparable"].agg(["median", "count"])
-        ret = ret.join(stats, on="article_code")
-        atyp = ret[(ret["count"] >= 3) & ((ret["prix_comparable"] > 3 * ret["median"]) | (ret["prix_comparable"] < ret["median"] / 3))]
-        atyp = atyp[["id_visite", "enqueteur", "nom_fournisseur", "article", "prix_comparable", "median", "base_retenue", "devise"]]
-        atyp.columns = ["Visite", "Enquêteur", "Fournisseur", "Article", "Prix par unité de base", "Médiane de l'article", "Base", "Devise"]
-        st.write(f"{len(atyp)} observation(s) atypiques.")
-        if len(atyp):
-            st.dataframe(atyp, hide_index=True, width="stretch")
-    else:
-        st.write("Pas encore assez de données.")
 
     st.subheader("Produits différents à suivre avec le superviseur")
     diff = items[items["different"]][["id_visite", "enqueteur", "nom_fournisseur", "article", "conformite_prec", "jour"]]
@@ -642,14 +913,14 @@ with tabs[6]:
         st.dataframe(dup_a[["id_visite", "enqueteur", "article", "prix_retenu", "disponibilite"]], hide_index=True, width="stretch")
 
 # ---- Données
-with tabs[7]:
+with T["Données"]:
     st.write("Export de la base : une ligne par article observé (feuille Articles) et une ligne par visite (feuille Visites), avec libellés et codes.")
     complet = st.checkbox("Exporter la base complète, sans tenir compte des filtres", value=True)
     exp_v = visits_all if complet else visits
     exp_i = items_all if complet else items
     drop = [c for c in ("jour_reception", "_f", "aboutie", "releve", "different", "retenue") if c in exp_v.columns or c in exp_i.columns]
     exp_v = exp_v.drop(columns=[c for c in drop if c in exp_v.columns]).rename(columns={"jour_visite": "jour_de_visite"})
-    exp_i = exp_i.drop(columns=[c for c in ("jour_reception", "releve", "different", "retenue") if c in exp_i.columns]).rename(columns={"jour_visite": "jour_de_visite"})
+    exp_i = exp_i.drop(columns=[c for c in ("jour_reception", "releve", "different", "retenue") if c in exp_i.columns]).rename(columns={"jour_visite": "jour_de_visite", "valide": "prix_valide"})
     exp_v = exp_v.drop(columns=[c for c in ("jour",) if c in exp_v.columns])
     exp_i = exp_i.drop(columns=[c for c in ("jour",) if c in exp_i.columns])
 
@@ -666,6 +937,10 @@ with tabs[7]:
         "Par ville": summarize(visits_all if complet else visits, items_all if complet else items, "ville"),
         "Par famille": summarize(visits_all if complet else visits, items_all if complet else items, "famille", nomenclature=nomenc_fam),
     }
+    src_i = items_all if complet else items
+    art_exp = coverage_table(src_i[src_i["valide"]], pret, labels, seuil)
+    sheets["Couverture articles"] = art_exp.drop(columns="article_code")
+    sheets["Couverture familles"] = coverage_by_famille(art_exp, seuil)
     stamp = pd.Timestamp.now(tz=TZ).strftime("%Y%m%d_%H%M")
     d1, d2, d3 = st.columns(3)
     d1.download_button("Télécharger le classeur Excel", to_excel(sheets), file_name=f"collecte_prix_{stamp}.xlsx",
